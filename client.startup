@@ -1,0 +1,203 @@
+#!/bin/bash
+echo "========================================"
+echo "  SIMULATION COMPLÈTE DHCPv4 & DHCPv6  "
+echo "========================================"
+
+# 1. Activer l'interface
+ip link set eth0 up
+echo "Interface eth0 activée"
+
+# 2. Configurer une IP statique pour les tests
+ip addr add 10.0.0.50/24 dev eth0
+ip addr add 2001:db8::50/64 dev eth0
+echo "IPs statiques configurées:"
+echo "  IPv4: 10.0.0.50/24"
+echo "  IPv6: 2001:db8::50/64"
+
+# 3. Démarrer la capture COMPLÈTE
+echo "Démarrage capture réseau..."
+tcpdump -i eth0 -w /shared/dhcp_complet.pcap -s 0 &
+TCPDUMP_PID=$!
+sleep 2
+
+# 4. Générer le processus DORA IPv4 COMPLET
+echo ""
+echo "=== GÉNÉRATION DHCPv4 (DORA) ==="
+echo ""
+
+cat > /generer_dhcpv4.py << 'EOF'
+#!/usr/bin/env python3
+from scapy.all import *
+import time
+
+print("Génération du processus DORA IPv4...")
+
+# Adresses de test
+client_mac = "00:11:22:33:44:55"
+server_mac = "aa:bb:cc:dd:ee:ff"
+server_ip = "10.0.0.1"
+client_ip = "10.0.0.100"
+
+print("1. DHCP DISCOVER - Client -> Broadcast")
+print("   MAC dst: ff:ff:ff:ff:ff:ff")
+print("   IP dst: 255.255.255.255")
+print("   Port: 67 (serveur)")
+discover = Ether(src=client_mac, dst="ff:ff:ff:ff:ff:ff") / \
+          IP(src="0.0.0.0", dst="255.255.255.255") / \
+          UDP(sport=68, dport=67) / \
+          BOOTP(chaddr=bytes.fromhex(client_mac.replace(":", ""))) / \
+          DHCP(options=[("message-type", "discover"), "end"])
+sendp(discover, iface="eth0", verbose=0)
+time.sleep(2)
+
+print("\n2. DHCP OFFER - Serveur -> Client")
+print("   MAC dst: 00:11:22:33:44:55 (unicast)")
+print("   IP dst: 10.0.0.100 (unicast)")
+print("   Port: 68 (client)")
+offer = Ether(src=server_mac, dst=client_mac) / \
+       IP(src=server_ip, dst=client_ip) / \
+       UDP(sport=67, dport=68) / \
+       BOOTP(op=2, yiaddr=client_ip, siaddr=server_ip, 
+             chaddr=bytes.fromhex(client_mac.replace(":", ""))) / \
+       DHCP(options=[("message-type", "offer"), "end"])
+sendp(offer, iface="eth0", verbose=0)
+time.sleep(2)
+
+print("\n3. DHCP REQUEST - Client -> Broadcast")
+print("   MAC dst: ff:ff:ff:ff:ff:ff")
+print("   IP dst: 255.255.255.255")
+print("   Port: 67 (serveur)")
+request = Ether(src=client_mac, dst="ff:ff:ff:ff:ff:ff") / \
+         IP(src="0.0.0.0", dst="255.255.255.255") / \
+         UDP(sport=68, dport=67) / \
+         BOOTP(chaddr=bytes.fromhex(client_mac.replace(":", ""))) / \
+         DHCP(options=[("message-type", "request"), "end"])
+sendp(request, iface="eth0", verbose=0)
+time.sleep(2)
+
+print("\n4. DHCP ACK - Serveur -> Client")
+print("   MAC dst: 00:11:22:33:44:55 (unicast)")
+print("   IP dst: 10.0.0.100 (unicast)")
+print("   Port: 68 (client)")
+ack = Ether(src=server_mac, dst=client_mac) / \
+     IP(src=server_ip, dst=client_ip) / \
+     UDP(sport=67, dport=68) / \
+     BOOTP(op=2, yiaddr=client_ip, siaddr=server_ip,
+           chaddr=bytes.fromhex(client_mac.replace(":", ""))) / \
+     DHCP(options=[("message-type", "ack"), "end"])
+sendp(ack, iface="eth0", verbose=0)
+
+print("\n✅ PROCESSUS DORA IPv4 COMPLET GÉNÉRÉ")
+EOF
+
+python3 /generer_dhcpv4.py
+sleep 3
+
+# 5. Générer le processus DHCPv6 COMPLET
+echo ""
+echo "=== GÉNÉRATION DHCPv6 (SARR) ==="
+echo ""
+
+cat > /generer_dhcpv6.py << 'EOF'
+#!/usr/bin/env python3
+from scapy.all import *
+from scapy.layers.inet6 import *
+import time
+
+print("Génération du processus DHCPv6 (Solicit-Advertise-Request-Reply)...")
+
+# Adresses IPv6
+client_mac = "00:11:22:33:44:66"
+server_mac = "aa:bb:cc:dd:ee:ff"
+server_ip = "2001:db8::1"
+client_ip = "2001:db8::100"
+multicast_dhcp = "ff02::1:2"
+multicast_mac = "33:33:00:01:00:02"
+
+print("\n1. DHCPv6 SOLICIT - Client -> Multicast")
+print("   MAC dst: 33:33:00:01:00:02 (multicast DHCPv6)")
+print("   IPv6 dst: ff02::1:2 (All_DHCP_Relay_Agents_and_Servers)")
+print("   Port: 547 (serveur)")
+# Paquet simplifié (Scapy a des limitations avec DHCPv6)
+solicit = Ether(src=client_mac, dst=multicast_mac) / \
+          IPv6(src="fe80::", dst=multicast_dhcp) / \
+          UDP(sport=546, dport=547) / \
+          Raw(load="DHCPv6_SOLICIT")
+sendp(solicit, iface="eth0", verbose=0)
+time.sleep(2)
+
+print("\n2. DHCPv6 ADVERTISE - Serveur -> Client")
+print("   MAC dst: 00:11:22:33:44:66 (unicast)")
+print("   IPv6 dst: 2001:db8::100 ou multicast")
+print("   Port: 546 (client)")
+advertise = Ether(src=server_mac, dst=client_mac) / \
+           IPv6(src=server_ip, dst=client_ip) / \
+           UDP(sport=547, dport=546) / \
+           Raw(load="DHCPv6_ADVERTISE")
+sendp(advertise, iface="eth0", verbose=0)
+time.sleep(2)
+
+print("\n3. DHCPv6 REQUEST - Client -> Multicast")
+print("   MAC dst: 33:33:00:01:00:02")
+print("   IPv6 dst: ff02::1:2")
+print("   Port: 547 (serveur)")
+request = Ether(src=client_mac, dst=multicast_mac) / \
+         IPv6(src="fe80::", dst=multicast_dhcp) / \
+         UDP(sport=546, dport=547) / \
+         Raw(load="DHCPv6_REQUEST")
+sendp(request, iface="eth0", verbose=0)
+time.sleep(2)
+
+print("\n4. DHCPv6 REPLY - Serveur -> Client")
+print("   MAC dst: 00:11:22:33:44:66 (unicast)")
+print("   IPv6 dst: 2001:db8::100 (unicast)")
+print("   Port: 546 (client)")
+reply = Ether(src=server_mac, dst=client_mac) / \
+       IPv6(src=server_ip, dst=client_ip) / \
+       UDP(sport=547, dport=546) / \
+       Raw(load="DHCPv6_REPLY")
+sendp(reply, iface="eth0", verbose=0)
+
+print("\n✅ PROCESSUS DHCPv6 COMPLET GÉNÉRÉ")
+EOF
+
+python3 /generer_dhcpv6.py
+sleep 3
+
+# 6. Afficher les statistiques
+echo ""
+echo "=== RÉCAPITULATIF DES CAPTURES ==="
+echo ""
+echo "Fichier capture: /shared/dhcp_complet.pcap"
+echo ""
+echo "Contenu de la capture:"
+echo "----------------------"
+echo "1. DHCPv4 DORA (4 paquets):"
+echo "   - DISCOVER  (Broadcast L2/L3)"
+echo "   - OFFER     (Unicast)"
+echo "   - REQUEST   (Broadcast)"
+echo "   - ACK       (Unicast)"
+echo ""
+echo "2. DHCPv6 SARR (4 paquets):"
+echo "   - SOLICIT   (Multicast L2/L3)"
+echo "   - ADVERTISE (Unicast)"
+echo "   - REQUEST   (Multicast)"
+echo "   - REPLY     (Unicast)"
+echo ""
+echo "Pour analyser dans Wireshark:"
+echo "  Filtre IPv4: bootp || dhcp"
+echo "  Filtre IPv6: dhcpv6 || ipv6"
+echo ""
+
+# 7. Arrêter tcpdump et afficher résumé
+kill $TCPDUMP_PID 2>/dev/null
+sleep 1
+
+echo "Analyse rapide de la capture..."
+tcpdump -r /shared/dhcp_complet.pcap -nn -c 20 2>/dev/null || echo "Capture prête pour Wireshark"
+
+# 8. Garder le conteneur ouvert
+echo ""
+echo "Simulation terminée. Le conteneur reste actif 5 minutes."
+echo "Copiez la capture avec: kathara copy client /shared/dhcp_complet.pcap .."
+sleep 300
